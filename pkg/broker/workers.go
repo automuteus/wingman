@@ -1,10 +1,7 @@
 package broker
 
 import (
-	"context"
 	"encoding/json"
-	"github.com/automuteus/utils/pkg/rediskey"
-	"github.com/automuteus/utils/pkg/task"
 	socketio "github.com/googollee/go-socket.io"
 	"log"
 )
@@ -14,50 +11,49 @@ import (
 // issue the task. This worker doesn't care about the response; the response is handled/passed on by the socket.io server
 // itself in broker.go
 func (broker *Broker) tasksListener(server *socketio.Server, connectCode string, killchan <-chan bool) {
-	pubsub := broker.client.Subscribe(context.Background(), rediskey.TasksSubscribe(connectCode))
-	log.Println("Task listener OPEN for " + connectCode)
-	defer log.Println("Task listener CLOSE for " + connectCode)
-	channel := pubsub.Channel()
 	for {
 		select {
-		case t := <-channel:
-			taskObj := task.ModifyTask{}
-
-			err := json.Unmarshal([]byte(t.Payload), &taskObj)
-			if err != nil {
-				log.Println(err)
-				break
-			}
-
-			log.Println("Broadcasting " + t.Payload + " to room " + connectCode)
-			server.BroadcastToRoom("/", connectCode, "modify", t.Payload)
-			break
 		case <-killchan:
-			pubsub.Close()
+			// TODO should also short-circuit the long-poll request being executed currently
 			return
-		}
-	}
-}
 
-// ackWorker functions as a healthcheck for the bot, if the bot resumes a game (by connectcode) when it starts up after
-// being down/offline. This worker receives the ack, and, if the connection is still active, responds with a
-// connection=true message. If the client has terminated the connection, then this worker is also terminated, and thus
-// the bot never receives a healthy response for the connectcode/game in question
-func (broker *Broker) ackWorker(ctx context.Context, connCode string, killChan <-chan bool) {
-	pubsub := task.AckSubscribe(ctx, broker.client, connCode)
-	channel := pubsub.Channel()
-	defer pubsub.Close()
-
-	for {
-		select {
-		case <-killChan:
-			return
-		case <-channel:
-			err := task.PushJob(ctx, broker.client, connCode, task.ConnectionJob, "true")
+		default:
+			task, err := broker.client.GetCaptureTask(connectCode)
 			if err != nil {
 				log.Println(err)
+			} else if task != nil {
+				jBytes, err := json.Marshal(task)
+				if err != nil {
+					log.Println(err)
+				} else {
+					log.Println("Broadcasting " + string(jBytes) + " to room " + connectCode)
+					server.BroadcastToRoom("/", connectCode, "modify", jBytes)
+				}
 			}
-			break
 		}
 	}
 }
+
+//
+//// ackWorker functions as a healthcheck for the bot, if the bot resumes a game (by connectcode) when it starts up after
+//// being down/offline. This worker receives the ack, and, if the connection is still active, responds with a
+//// connection=true message. If the client has terminated the connection, then this worker is also terminated, and thus
+//// the bot never receives a healthy response for the connectcode/game in question
+//func (broker *Broker) ackWorker(ctx context.Context, connCode string, killChan <-chan bool) {
+//	pubsub := task.AckSubscribe(ctx, broker.client, connCode)
+//	channel := pubsub.Channel()
+//	defer pubsub.Close()
+//
+//	for {
+//		select {
+//		case <-killChan:
+//			return
+//		case <-channel:
+//			err := task.PushJob(ctx, broker.client, connCode, task.ConnectionJob, "true")
+//			if err != nil {
+//				log.Println(err)
+//			}
+//			break
+//		}
+//	}
+//}

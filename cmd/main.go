@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/automuteus/wingman/pkg/broker"
+	"go.uber.org/zap"
 	"log"
 	"os"
 	"os/signal"
@@ -11,9 +12,14 @@ import (
 const DefaultWingmanPort = "8123"
 
 func main() {
-	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		log.Fatal("No REDIS_ADDR specified. Exiting.")
+	logger, err := zap.NewProduction()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	galactusAddr := os.Getenv("GALACTUS_ADDR")
+	if galactusAddr == "" {
+		log.Fatal("no GALACTUS_ADDR specified; exiting")
 	}
 
 	brokerPort := os.Getenv("WINGMAN_PORT")
@@ -22,21 +28,7 @@ func main() {
 		brokerPort = DefaultWingmanPort
 	}
 
-	redisUser := os.Getenv("REDIS_USER")
-	redisPass := os.Getenv("REDIS_PASS")
-	if redisUser != "" {
-		log.Println("Using REDIS_USER=" + redisUser)
-	} else {
-		log.Println("No REDIS_USER specified.")
-	}
-
-	if redisPass != "" {
-		log.Println("Using REDIS_PASS=<redacted>")
-	} else {
-		log.Println("No REDIS_PASS specified.")
-	}
-
-	socketBroker := broker.NewBroker(redisAddr, redisUser, redisPass)
+	socketBroker := broker.NewBroker(galactusAddr, logger)
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)

@@ -1,15 +1,13 @@
 package broker
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
+	galactus_client "github.com/automuteus/galactus/pkg/client"
+	"github.com/automuteus/utils/pkg/capture"
 	"github.com/automuteus/utils/pkg/game"
-	"github.com/automuteus/utils/pkg/rediskey"
-	"github.com/automuteus/utils/pkg/task"
-	"github.com/go-redis/redis/v8"
 	socketio "github.com/googollee/go-socket.io"
 	"github.com/gorilla/mux"
+	"go.uber.org/zap"
 	"log"
 	"net/http"
 	"strconv"
@@ -20,7 +18,7 @@ import (
 const ConnectCodeLength = 8
 
 type Broker struct {
-	client *redis.Client
+	client *galactus_client.GalactusClient
 
 	// map of socket IDs to connection codes
 	connections map[string]string
@@ -29,15 +27,16 @@ type Broker struct {
 	connectionsLock sync.RWMutex
 }
 
-func NewBroker(redisAddr, redisUser, redisPass string) *Broker {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Username: redisUser,
-		Password: redisPass,
-		DB:       0, // use default DB
-	})
+func NewBroker(galactusAddr string, logger *zap.Logger) *Broker {
+	client, err := galactus_client.NewGalactusClient(galactusAddr, logger)
+	for err != nil {
+		logger.Error("error connecting to galactus. Retrying every second until it is reachable",
+			zap.Error(err))
+		time.Sleep(time.Second)
+		client, err = galactus_client.NewGalactusClient(galactusAddr, logger)
+	}
 	return &Broker{
-		client:          rdb,
+		client:          client,
 		connections:     map[string]string{},
 		ackKillChannels: map[string]chan bool{},
 		connectionsLock: sync.RWMutex{},
@@ -68,11 +67,14 @@ func (broker *Broker) Start(port string) {
 			broker.ackKillChannels[s.ID()] = killChannel
 			broker.connectionsLock.Unlock()
 
-			err := task.PushJob(context.Background(), broker.client, msg, task.ConnectionJob, "true")
+			event := capture.Event{
+				EventType: capture.Connection,
+				Payload:   []byte("true"),
+			}
+			err := broker.client.AddCaptureEvent(msg, event)
 			if err != nil {
 				log.Println(err)
 			}
-			go broker.ackWorker(context.Background(), msg, killChannel)
 		}
 	})
 
@@ -95,15 +97,19 @@ func (broker *Broker) Start(port string) {
 	})
 
 	server.OnEvent("/", "taskFailed", func(s socketio.Conn, msg string) {
-		log.Printf("Received failure for task ID: \"%s\"", msg)
-
-		broker.client.Publish(context.Background(), rediskey.CompleteTask(msg), "false")
+		err := broker.client.SetCaptureTaskStatus(msg, "false")
+		if err != nil {
+			log.Println("error marking task " + msg + " as unsuccessful")
+			log.Println(err)
+		}
 	})
 
 	server.OnEvent("/", "taskComplete", func(s socketio.Conn, msg string) {
-		log.Printf("Received success for task ID: \"%s\"", msg)
-
-		broker.client.Publish(context.Background(), rediskey.CompleteTask(msg), "true")
+		err := broker.client.SetCaptureTaskStatus(msg, "true")
+		if err != nil {
+			log.Println("error marking task " + msg + " as successful")
+			log.Println(err)
+		}
 	})
 
 	server.OnEvent("/", "lobby", func(s socketio.Conn, msg string) {
@@ -117,15 +123,13 @@ func (broker *Broker) Start(port string) {
 		} else {
 			broker.connectionsLock.RLock()
 			if cCode, ok := broker.connections[s.ID()]; ok {
-				err := task.PushJob(context.Background(), broker.client, cCode, task.LobbyJob, msg)
-				if err != nil {
-					log.Println(err)
+				event := capture.Event{
+					EventType: capture.Lobby,
+					Payload:   []byte(msg),
 				}
-				err = broker.client.Set(context.Background(), rediskey.RoomCodesForConnCode(cCode), lobby.LobbyCode, time.Minute*15).Err()
+				err := broker.client.AddCaptureEvent(cCode, event)
 				if err != nil {
 					log.Println(err)
-				} else {
-					log.Printf("Updated room code %s for connect code %s in Redis", lobby.LobbyCode, cCode)
 				}
 			}
 			broker.connectionsLock.RUnlock()
@@ -139,12 +143,12 @@ func (broker *Broker) Start(port string) {
 		} else {
 			broker.connectionsLock.RLock()
 			if cCode, ok := broker.connections[s.ID()]; ok {
-				err := task.PushJob(context.Background(), broker.client, cCode, task.StateJob, msg)
-				if err != nil {
-					log.Println(err)
+				event := capture.Event{
+					EventType: capture.State,
+					Payload:   []byte(msg),
 				}
-				err = broker.client.Expire(context.Background(), rediskey.RoomCodesForConnCode(cCode), time.Minute*15).Err()
-				if !errors.Is(err, redis.Nil) && err != nil {
+				err := broker.client.AddCaptureEvent(cCode, event)
+				if err != nil {
 					log.Println(err)
 				}
 			}
@@ -156,12 +160,12 @@ func (broker *Broker) Start(port string) {
 
 		broker.connectionsLock.RLock()
 		if cCode, ok := broker.connections[s.ID()]; ok {
-			err := task.PushJob(context.Background(), broker.client, cCode, task.PlayerJob, msg)
-			if err != nil {
-				log.Println(err)
+			event := capture.Event{
+				EventType: capture.Player,
+				Payload:   []byte(msg),
 			}
-			err = broker.client.Expire(context.Background(), rediskey.RoomCodesForConnCode(cCode), time.Minute*15).Err()
-			if !errors.Is(err, redis.Nil) && err != nil {
+			err := broker.client.AddCaptureEvent(cCode, event)
+			if err != nil {
 				log.Println(err)
 			}
 		}
@@ -170,7 +174,11 @@ func (broker *Broker) Start(port string) {
 	server.OnEvent("/", "gameover", func(s socketio.Conn, msg string) {
 		broker.connectionsLock.RLock()
 		if cCode, ok := broker.connections[s.ID()]; ok {
-			err := task.PushJob(context.Background(), broker.client, cCode, task.GameOverJob, msg)
+			event := capture.Event{
+				EventType: capture.GameOver,
+				Payload:   []byte(msg),
+			}
+			err := broker.client.AddCaptureEvent(cCode, event)
 			if err != nil {
 				log.Println(err)
 			}
@@ -185,7 +193,11 @@ func (broker *Broker) Start(port string) {
 
 		broker.connectionsLock.RLock()
 		if cCode, ok := broker.connections[s.ID()]; ok {
-			err := task.PushJob(context.Background(), broker.client, cCode, task.ConnectionJob, "false")
+			event := capture.Event{
+				EventType: capture.Connection,
+				Payload:   []byte("false"),
+			}
+			err := broker.client.AddCaptureEvent(cCode, event)
 			if err != nil {
 				log.Println(err)
 			}
@@ -206,80 +218,11 @@ func (broker *Broker) Start(port string) {
 
 	router := mux.NewRouter()
 	router.Handle("/socket.io/", server)
+
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// TODO For any higher-sensitivity info in the future, this should properly identify the origin specifically
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length")
-
-		broker.connectionsLock.RLock()
-		activeConns := len(broker.connections)
-		broker.connectionsLock.RUnlock()
-
-		// default to listing active games in the last 15 mins
-		activeGames := rediskey.GetActiveGames(context.Background(), broker.client, 900)
-		version, commit := rediskey.GetVersionAndCommit(context.Background(), broker.client)
-		totalGuilds := rediskey.GetGuildCounter(context.Background(), broker.client)
-		totalUsers := rediskey.GetTotalUsers(context.Background(), broker.client)
-		totalGames := rediskey.GetTotalGames(context.Background(), broker.client)
-
-		data := map[string]interface{}{
-			"version":           version,
-			"commit":            commit,
-			"totalGuilds":       totalGuilds,
-			"activeConnections": activeConns,
-			"activeGames":       activeGames,
-			"totalUsers":        totalUsers,
-			"totalGames":        totalGames,
-		}
-
-		jsonBytes, err := json.Marshal(data)
-		if err != nil {
-			log.Println(err)
-		}
-		w.Write(jsonBytes)
-	})
-
-	router.HandleFunc("/lobbycode/{connectCode}", func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-		conncode := vars["connectCode"]
-
-		if conncode == "" || len(conncode) != ConnectCodeLength {
-			errorResponse(w)
-			return
-		}
-
-		key, err := broker.client.Get(context.Background(), rediskey.RoomCodesForConnCode(conncode)).Result()
-		if errors.Is(err, redis.Nil) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		resp := resp{Result: key}
-		jbytes, err := json.Marshal(resp)
-		if err != nil {
-			log.Println(err)
-			w.WriteHeader(http.StatusInternalServerError)
-		} else {
-			w.WriteHeader(http.StatusOK)
-			w.Write(jbytes)
-		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
 	})
 	log.Printf("Message broker is running on port %s...\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, router))
-}
-
-type resp struct {
-	Result string `json:"result"`
-}
-
-func errorResponse(w http.ResponseWriter) {
-	w.WriteHeader(http.StatusBadRequest)
-	r := resp{Result: "error"}
-	jbytes, err := json.Marshal(r)
-	if err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-	} else {
-		w.Write(jbytes)
-	}
 }

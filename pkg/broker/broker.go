@@ -8,7 +8,6 @@ import (
 	socketio "github.com/googollee/go-socket.io"
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
-	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -25,6 +24,8 @@ type Broker struct {
 
 	ackKillChannels map[string]chan bool
 	connectionsLock sync.RWMutex
+
+	logger *zap.Logger
 }
 
 func NewBroker(galactusAddr string, logger *zap.Logger) *Broker {
@@ -40,24 +41,32 @@ func NewBroker(galactusAddr string, logger *zap.Logger) *Broker {
 		connections:     map[string]string{},
 		ackKillChannels: map[string]chan bool{},
 		connectionsLock: sync.RWMutex{},
+		logger:          logger,
 	}
 }
 
 func (broker *Broker) Start(port string) {
+	logger := broker.logger
 	server, err := socketio.NewServer(nil)
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("failed to start socket server with error",
+			zap.Error(err),
+		)
 	}
 
 	server.OnConnect("/", func(s socketio.Conn) error {
 		s.SetContext("")
-		log.Println("connected:", s.ID())
+		logger.Info("socket.io client connected",
+			zap.String("socketID", s.ID()))
 		return nil
 	})
-	server.OnEvent("/", "connectCode", func(s socketio.Conn, msg string) {
-		log.Printf("Received connection code: \"%s\"", msg)
 
+	server.OnEvent("/", "connectCode", func(s socketio.Conn, msg string) {
 		if len(msg) != ConnectCodeLength {
+			logger.Info("closing socket connection because connectCode is invalid",
+				zap.String("socketID", s.ID()),
+				zap.String("connectCode", msg),
+			)
 			s.Close()
 		} else {
 			killChannel := make(chan bool)
@@ -73,24 +82,40 @@ func (broker *Broker) Start(port string) {
 			}
 			err := broker.client.AddCaptureEvent(msg, event)
 			if err != nil {
-				log.Println(err)
+				logger.Error("error sending connection capture message to galactus",
+					zap.Error(err),
+					zap.String("socketID", s.ID()),
+					zap.String("connectCode", msg),
+					zap.Int("eventType", int(event.EventType)),
+					zap.ByteString("payload", event.Payload),
+				)
+			} else {
+				logger.Info("successfully sent connection capture event to galactus",
+					zap.String("socketID", s.ID()),
+					zap.String("connectCode", msg),
+					zap.Int("eventType", int(event.EventType)),
+					zap.ByteString("payload", event.Payload),
+				)
 			}
 		}
 	})
 
 	// only join the room for the connect code once we ensure that the bot actually connects with a valid discord session
 	server.OnEvent("/", "botID", func(s socketio.Conn, msg int64) {
-		log.Printf("Received bot ID: \"%d\"", msg)
-
 		broker.connectionsLock.RLock()
-		if code, ok := broker.connections[s.ID()]; ok {
+		if cCode, ok := broker.connections[s.ID()]; ok {
+			logger.Info("received BotID for Socket client",
+				zap.String("socketID", s.ID()),
+				zap.Int64("botID", msg))
 			// this socket is now listening for mutes that can be applied via that connect code
-			s.Join(code)
+			s.Join(cCode)
 			killChan := broker.ackKillChannels[s.ID()]
 			if killChan != nil {
-				go broker.tasksListener(server, code, killChan)
+				go broker.tasksListener(server, cCode, killChan)
 			} else {
-				log.Println("Null killchannel for conncode: " + code + ". This means we got a Bot ID before a connect code!")
+				logger.Error("null killchannel for connectCode (received botID before connectCode message)",
+					zap.String("connectCode", cCode),
+				)
 			}
 		}
 		broker.connectionsLock.RUnlock()
@@ -99,27 +124,33 @@ func (broker *Broker) Start(port string) {
 	server.OnEvent("/", "taskFailed", func(s socketio.Conn, msg string) {
 		err := broker.client.SetCaptureTaskStatus(msg, "false")
 		if err != nil {
-			log.Println("error marking task " + msg + " as unsuccessful")
-			log.Println(err)
+			logger.Error("error marking task as unsuccessful",
+				zap.Error(err),
+				zap.String("task", msg),
+			)
 		}
 	})
 
 	server.OnEvent("/", "taskComplete", func(s socketio.Conn, msg string) {
 		err := broker.client.SetCaptureTaskStatus(msg, "true")
 		if err != nil {
-			log.Println("error marking task " + msg + " as successful")
-			log.Println(err)
+			logger.Error("error marking task as successful",
+				zap.Error(err),
+				zap.String("task", msg),
+			)
 		}
 	})
 
 	server.OnEvent("/", "lobby", func(s socketio.Conn, msg string) {
-		log.Println("lobby:", msg)
-
 		// validation
 		var lobby game.Lobby
 		err := json.Unmarshal([]byte(msg), &lobby)
 		if err != nil {
-			log.Println(err)
+			logger.Error("error unmarshalling lobby message",
+				zap.Error(err),
+				zap.String("socketID", s.ID()),
+				zap.String("payload", msg),
+			)
 		} else {
 			broker.connectionsLock.RLock()
 			if cCode, ok := broker.connections[s.ID()]; ok {
@@ -129,17 +160,34 @@ func (broker *Broker) Start(port string) {
 				}
 				err := broker.client.AddCaptureEvent(cCode, event)
 				if err != nil {
-					log.Println(err)
+					logger.Error("error sending lobby capture message to galactus",
+						zap.Error(err),
+						zap.String("socketID", s.ID()),
+						zap.String("connectCode", cCode),
+						zap.Int("eventType", int(event.EventType)),
+						zap.ByteString("payload", event.Payload),
+					)
+				} else {
+					logger.Info("successfully sent lobby capture event to galactus",
+						zap.String("socketID", s.ID()),
+						zap.String("connectCode", cCode),
+						zap.Int("eventType", int(event.EventType)),
+						zap.ByteString("payload", event.Payload),
+					)
 				}
 			}
 			broker.connectionsLock.RUnlock()
 		}
 	})
 	server.OnEvent("/", "state", func(s socketio.Conn, msg string) {
-		log.Println("phase received from capture: ", msg)
+
 		_, err := strconv.Atoi(msg)
 		if err != nil {
-			log.Println(err)
+			logger.Error("error unmarshalling state message",
+				zap.Error(err),
+				zap.String("socketID", s.ID()),
+				zap.String("payload", msg),
+			)
 		} else {
 			broker.connectionsLock.RLock()
 			if cCode, ok := broker.connections[s.ID()]; ok {
@@ -149,29 +197,69 @@ func (broker *Broker) Start(port string) {
 				}
 				err := broker.client.AddCaptureEvent(cCode, event)
 				if err != nil {
-					log.Println(err)
+					logger.Error("error sending state capture message to galactus",
+						zap.Error(err),
+						zap.String("socketID", s.ID()),
+						zap.String("connectCode", cCode),
+						zap.Int("eventType", int(event.EventType)),
+						zap.ByteString("payload", event.Payload),
+					)
+				} else {
+					logger.Info("successfully sent state capture event to galactus",
+						zap.String("socketID", s.ID()),
+						zap.String("connectCode", cCode),
+						zap.Int("eventType", int(event.EventType)),
+						zap.ByteString("payload", event.Payload),
+					)
 				}
 			}
 			broker.connectionsLock.RUnlock()
 		}
 	})
 	server.OnEvent("/", "player", func(s socketio.Conn, msg string) {
-		log.Println("player received from capture: ", msg)
 
-		broker.connectionsLock.RLock()
-		if cCode, ok := broker.connections[s.ID()]; ok {
-			event := capture.Event{
-				EventType: capture.Player,
-				Payload:   []byte(msg),
+		// validation
+		var player game.Player
+		err := json.Unmarshal([]byte(msg), &player)
+		if err != nil {
+			logger.Error("error unmarshalling player message",
+				zap.Error(err),
+				zap.String("socketID", s.ID()),
+				zap.String("connectCode", msg),
+				zap.String("payload", msg),
+			)
+		} else {
+			broker.connectionsLock.RLock()
+			if cCode, ok := broker.connections[s.ID()]; ok {
+				event := capture.Event{
+					EventType: capture.Player,
+					Payload:   []byte(msg),
+				}
+				err := broker.client.AddCaptureEvent(cCode, event)
+				if err != nil {
+					logger.Error("error sending player capture message to galactus",
+						zap.Error(err),
+						zap.String("socketID", s.ID()),
+						zap.String("connectCode", cCode),
+						zap.Int("eventType", int(event.EventType)),
+						zap.ByteString("payload", event.Payload),
+					)
+				} else {
+					logger.Info("successfully sent player capture event to galactus",
+						zap.String("socketID", s.ID()),
+						zap.String("connectCode", cCode),
+						zap.Int("eventType", int(event.EventType)),
+						zap.ByteString("payload", event.Payload),
+					)
+				}
 			}
-			err := broker.client.AddCaptureEvent(cCode, event)
-			if err != nil {
-				log.Println(err)
-			}
+			broker.connectionsLock.RUnlock()
 		}
-		broker.connectionsLock.RUnlock()
 	})
 	server.OnEvent("/", "gameover", func(s socketio.Conn, msg string) {
+
+		// TODO validate gameover message
+
 		broker.connectionsLock.RLock()
 		if cCode, ok := broker.connections[s.ID()]; ok {
 			event := capture.Event{
@@ -180,16 +268,35 @@ func (broker *Broker) Start(port string) {
 			}
 			err := broker.client.AddCaptureEvent(cCode, event)
 			if err != nil {
-				log.Println(err)
+				logger.Error("error sending gameover capture message to galactus",
+					zap.Error(err),
+					zap.String("socketID", s.ID()),
+					zap.String("connectCode", cCode),
+					zap.Int("eventType", int(event.EventType)),
+					zap.ByteString("payload", event.Payload),
+				)
+			} else {
+				logger.Info("successfully sent gameover capture event to galactus",
+					zap.String("socketID", s.ID()),
+					zap.String("connectCode", cCode),
+					zap.Int("eventType", int(event.EventType)),
+					zap.ByteString("payload", event.Payload),
+				)
 			}
 		}
 		broker.connectionsLock.RUnlock()
 	})
 	server.OnError("/", func(s socketio.Conn, e error) {
-		log.Println("meet error:", e)
+		logger.Error("socket error",
+			zap.Error(err),
+			zap.String("socketID", s.ID()),
+		)
 	})
 	server.OnDisconnect("/", func(s socketio.Conn, reason string) {
-		log.Println("Client connection closed: ", reason)
+		logger.Info("client connection closed",
+			zap.String("socketID", s.ID()),
+			zap.String("reason", reason),
+		)
 
 		broker.connectionsLock.RLock()
 		if cCode, ok := broker.connections[s.ID()]; ok {
@@ -199,7 +306,20 @@ func (broker *Broker) Start(port string) {
 			}
 			err := broker.client.AddCaptureEvent(cCode, event)
 			if err != nil {
-				log.Println(err)
+				logger.Error("error sending connection capture message to galactus",
+					zap.Error(err),
+					zap.String("socketID", s.ID()),
+					zap.String("connectCode", cCode),
+					zap.Int("eventType", int(event.EventType)),
+					zap.ByteString("payload", event.Payload),
+				)
+			} else {
+				logger.Info("successfully sent connection capture event to galactus",
+					zap.String("socketID", s.ID()),
+					zap.String("connectCode", cCode),
+					zap.Int("eventType", int(event.EventType)),
+					zap.ByteString("payload", event.Payload),
+				)
 			}
 			server.ClearRoom("/", cCode)
 		}
@@ -223,6 +343,10 @@ func (broker *Broker) Start(port string) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	log.Printf("Message broker is running on port %s...\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, router))
+	logger.Info("message broker is now running",
+		zap.String("port", port))
+
+	err = http.ListenAndServe(":"+port, router)
+	logger.Fatal("message broker terminated with error",
+		zap.Error(err))
 }

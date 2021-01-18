@@ -19,12 +19,13 @@ func main() {
 
 	galactusAddr := os.Getenv("GALACTUS_ADDR")
 	if galactusAddr == "" {
-		log.Fatal("no GALACTUS_ADDR specified; exiting")
+		logger.Fatal("no GALACTUS_ADDR specified")
 	}
 
 	brokerPort := os.Getenv("WINGMAN_PORT")
 	if brokerPort == "" {
-		log.Println("No WINGMAN_PORT provided. Defaulting to " + DefaultWingmanPort)
+		logger.Info("no WINGMAN_PORT provided. Using default value",
+			zap.String("default", DefaultWingmanPort))
 		brokerPort = DefaultWingmanPort
 	}
 
@@ -36,5 +37,5 @@ func main() {
 	go socketBroker.Start(brokerPort)
 
 	<-sc
-	log.Println("Wingman received a kill/term signal and will now exit")
+	logger.Info("wingman received a kill/term signal and is not exiting")
 }

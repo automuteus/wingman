@@ -3,7 +3,7 @@ package broker
 import (
 	"encoding/json"
 	socketio "github.com/googollee/go-socket.io"
-	"log"
+	"go.uber.org/zap"
 )
 
 // tasksListener is a worker that waits for incoming mute/deafen tasks for a particular game (via a Redis pub/sub).
@@ -11,22 +11,34 @@ import (
 // issue the task. This worker doesn't care about the response; the response is handled/passed on by the socket.io server
 // itself in broker.go
 func (broker *Broker) tasksListener(server *socketio.Server, connectCode string, killchan <-chan bool) {
+	broker.logger.Info("client is now listening for mute/deafen tasks",
+		zap.String("connectCode", connectCode),
+	)
 	for {
 		select {
 		case <-killchan:
+			broker.logger.Info("stopping task listener for client",
+				zap.String("connectCode", connectCode),
+			)
 			// TODO should also short-circuit the long-poll request being executed currently
 			return
 
 		default:
 			task, err := broker.client.GetCaptureTask(connectCode)
 			if err != nil {
-				log.Println(err)
+				// TODO fix the return error being non-nil when there are no tasks available (it's not an "error")
 			} else if task != nil {
 				jBytes, err := json.Marshal(task)
 				if err != nil {
-					log.Println(err)
+					broker.logger.Error("failed to marshal task to json with error",
+						zap.Error(err),
+						zap.String("connectCode", connectCode),
+					)
 				} else {
-					log.Println("Broadcasting " + string(jBytes) + " to room " + connectCode)
+					broker.logger.Info("broadcasting task message to room",
+						zap.ByteString("message", jBytes),
+						zap.String("connectCode", connectCode),
+					)
 					server.BroadcastToRoom("/", connectCode, "modify", jBytes)
 				}
 			}

@@ -1,12 +1,13 @@
 package broker
 
 import (
+	"context"
 	"encoding/json"
 	socketio "github.com/googollee/go-socket.io"
 	"go.uber.org/zap"
 )
 
-// tasksListener is a worker that waits for incoming mute/deafen tasks for a particular game (via a Redis pub/sub).
+// tasksListener is a worker that waits for incoming mute/deafen tasks for a particular game (HTTP long-polling with Galactus)
 // This worker broadcasts the task to the Socket.io room associated with the connectcode, to see if any Capture Bots can
 // issue the task. This worker doesn't care about the response; the response is handled/passed on by the socket.io server
 // itself in broker.go
@@ -14,33 +15,34 @@ func (broker *Broker) tasksListener(server *socketio.Server, connectCode string,
 	broker.logger.Info("client is now listening for mute/deafen tasks",
 		zap.String("connectCode", connectCode),
 	)
-	for {
-		select {
-		case <-killchan:
-			broker.logger.Info("stopping task listener for client",
-				zap.String("connectCode", connectCode),
-			)
-			// TODO should also short-circuit the long-poll request being executed currently
-			return
+	ctx, cancelRequest := context.WithCancel(context.Background())
 
-		default:
-			task, err := broker.client.GetCaptureTask(connectCode)
+	go func() {
+		<-killchan
+		broker.logger.Info("stopping task listener for client",
+			zap.String("connectCode", connectCode),
+		)
+		cancelRequest()
+		return
+	}()
+
+	for {
+		task, err := broker.client.GetCaptureTask(ctx, connectCode)
+		if err != nil {
+			// TODO fix the return error being non-nil when there are no tasks available (it's not an "error")
+		} else if task != nil {
+			jBytes, err := json.Marshal(task)
 			if err != nil {
-				// TODO fix the return error being non-nil when there are no tasks available (it's not an "error")
-			} else if task != nil {
-				jBytes, err := json.Marshal(task)
-				if err != nil {
-					broker.logger.Error("failed to marshal task to json with error",
-						zap.Error(err),
-						zap.String("connectCode", connectCode),
-					)
-				} else {
-					broker.logger.Info("broadcasting task message to room",
-						zap.ByteString("message", jBytes),
-						zap.String("connectCode", connectCode),
-					)
-					server.BroadcastToRoom("/", connectCode, "modify", jBytes)
-				}
+				broker.logger.Error("failed to marshal task to json with error",
+					zap.Error(err),
+					zap.String("connectCode", connectCode),
+				)
+			} else {
+				broker.logger.Info("broadcasting task message to room",
+					zap.ByteString("message", jBytes),
+					zap.String("connectCode", connectCode),
+				)
+				server.BroadcastToRoom("/", connectCode, "modify", jBytes)
 			}
 		}
 	}

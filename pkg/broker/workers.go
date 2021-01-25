@@ -29,6 +29,10 @@ func (broker *Broker) tasksListener(server *socketio.Server, connectCode string,
 	for {
 		task, err := broker.client.GetCaptureTask(ctx, connectCode)
 		if err != nil {
+			broker.logger.Error("error fetching capture task from galactus",
+				zap.Error(err),
+				zap.String("connectCode", connectCode),
+			)
 			// TODO fix the return error being non-nil when there are no tasks available (it's not an "error")
 		} else if task != nil {
 			jBytes, err := json.Marshal(task)

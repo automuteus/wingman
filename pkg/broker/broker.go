@@ -294,12 +294,12 @@ func (broker *Broker) Start(port string) {
 	server.OnError("/", func(s socketio.Conn, e error) {
 		if s != nil {
 			logger.Error("socket error",
-				zap.Error(err),
+				zap.Error(e),
 				zap.String("socketID", s.ID()),
 			)
 		} else {
 			logger.Error("socket error (nil socket)",
-				zap.Error(err),
+				zap.Error(e),
 			)
 		}
 	})

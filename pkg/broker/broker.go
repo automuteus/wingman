@@ -71,6 +71,9 @@ func (broker *Broker) Start(port string) {
 		} else {
 			killChannel := make(chan bool)
 
+			logger.Info("received connection code",
+				zap.String("connectCode", msg))
+
 			broker.connectionsLock.Lock()
 			broker.connections[s.ID()] = msg
 			broker.ackKillChannels[s.ID()] = killChannel
@@ -80,6 +83,8 @@ func (broker *Broker) Start(port string) {
 				EventType: capture.Connection,
 				Payload:   []byte("true"),
 			}
+			logger.Info("sending connection message to galactus")
+
 			err := broker.client.AddCaptureEvent(msg, event)
 			if err != nil {
 				logger.Error("error sending connection capture message to galactus",

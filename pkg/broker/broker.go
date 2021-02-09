@@ -292,12 +292,21 @@ func (broker *Broker) Start(port string) {
 		broker.connectionsLock.RUnlock()
 	})
 	server.OnError("/", func(s socketio.Conn, e error) {
-		logger.Error("socket error",
-			zap.Error(err),
-			zap.String("socketID", s.ID()),
-		)
+		if s != nil {
+			logger.Error("socket error",
+				zap.Error(err),
+				zap.String("socketID", s.ID()),
+			)
+		} else {
+			logger.Error("socket error (nil socket)",
+				zap.Error(err),
+			)
+		}
 	})
 	server.OnDisconnect("/", func(s socketio.Conn, reason string) {
+		if s == nil {
+			return
+		}
 		logger.Info("client connection closed",
 			zap.String("socketID", s.ID()),
 			zap.String("reason", reason),

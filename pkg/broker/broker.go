@@ -8,6 +8,7 @@ import (
 	socketio "github.com/googollee/go-socket.io"
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
+	"io/ioutil"
 	"net/http"
 	"strconv"
 	"sync"
@@ -344,8 +345,27 @@ func (broker *Broker) Start(port string) {
 	router.Handle("/socket.io/", server)
 
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		resp, err := http.Get(broker.client.Address + "/api/")
+		if err != nil {
+			logger.Error("Failed to reach Galactus for stats with error",
+				zap.Error(err),
+			)
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte("not ok"))
+			return
+		}
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			logger.Error("Failed to read Galactus stats body",
+				zap.Error(err),
+			)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("not ok"))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		w.Write(body)
 	})
 	logger.Info("message broker is now running",
 		zap.String("port", port))

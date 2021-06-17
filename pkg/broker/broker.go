@@ -332,7 +332,7 @@ func (broker *Broker) Start(port string) {
 
 		broker.connectionsLock.Lock()
 		if c, ok := broker.ackKillChannels[s.ID()]; ok {
-			c <- true
+			close(c)
 		}
 		delete(broker.ackKillChannels, s.ID())
 		delete(broker.connections, s.ID())
